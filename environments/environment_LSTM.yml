@@ -1,0 +1,4 @@
+name: env_model
+channels:
+  - conda-forge
+  - defaults

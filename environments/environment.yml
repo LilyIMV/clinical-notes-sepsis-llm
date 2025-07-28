@@ -1,0 +1,26 @@
+name: env
+channels:
+  - nvidia
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - numpy
+  - pandas
+  - tqdm
+  - pytorch=2.6.0
+  - torchvision
+  - pytorch-cuda=12.1
+  - scikit-learn
+  - transformers
+  - spacy
+  - sentencepiece
+  - accelerate
+  - matplotlib
+  - pip:
+      - torchaudio
+      - scispacy
+      - medspacy
+      - en-core-sci-md @ https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_md-0.5.4.tar.gz
