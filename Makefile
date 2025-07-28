@@ -1,6 +1,6 @@
 # Variables
-MYSQL_DATABASE := mimic
-MYSQL_USER := vogelily
+MYSQL_DATABASE := YOUR_DATABASE
+MYSQL_USER := YOUR_USERNAME
 
 # Target
 query:
