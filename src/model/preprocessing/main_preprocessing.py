@@ -1,8 +1,10 @@
 '''
 ---------------------------------
 Author: Michael Moor, 11.10.2018
+Edited: Lily Voge 2025
 ---------------------------------
 This code is used to preprocess vital/lab data in a way that the format can be directly used for mgp-rnn baseline. Our proposed methods start out from this format too.
+Edited to include notes and preprocess for the keras library.
 
 '''
 
@@ -26,7 +28,7 @@ import pickle
 from .collect_records import *
 from .bin_and_impute import bin_and_impute
 
-BASE_DIR = os.path.expanduser('~/thesis/final')
+BASE_DIR = os.path.expanduser('YOUR_PATH')
 
 def path(rel):
     return os.path.join(BASE_DIR, rel)
@@ -75,7 +77,6 @@ def extract_window(data=None, static_data=None, onset_name=None, horizon=0):
         pat_window['chart_time'] = np.floor(
             (early_end - pat_window.index) / pd.Timedelta(hours=1)
         ).astype(int)
-
 
         result = pd.concat([result, pat_window.reset_index(drop=True)], ignore_index=True)
 
@@ -192,16 +193,27 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
     control_labs_in = path('output/control_55h_hourly_labs_binned.csv')
     control_labs_out = path('output/control_55h_hourly_labs_binned_collected.csv')
 
-
+    
     # Optional: Load notes if specified
     # Check if any M-version notes are requested
     note_versions = {'M1', 'M2', 'M3'}
-    selected_notes = note_versions.intersection(data_sources)
-    if selected_notes:
+    use_notes = note_versions.intersection(data_sources)
+    use_labvitals = 'labs' in data_sources and 'vitals' in data_sources
+
+    if not (use_notes or use_labvitals or (use_notes and use_labvitals)):
+        raise ValueError(
+            f"[ERROR] Invalid combination in data_sources: {data_sources}. "
+            "Use either ['labs','vitals'], a single note source like ['M1'], or all three like ['labs','vitals','M1']"
+        )
+
+    if use_notes:
         print("Collecting Notes...")
-        note_type = sorted(selected_notes)[0]  # choose the first if multiple (e.g., M1)
+
+        note_type = sorted(use_notes)[0]  # choose the first if multiple (e.g., M1)
+
         case_notes_in = path(f'output/{note_type}_case.csv')
         control_notes_in = path(f'output/{note_type}_control.csv')
+
         binned_split_out = path('output/labvitals_tr_te_val_binned_note_{}_min_length_{}_max_length_{}_horizon_{}_split_{}.pkl'.format(note_type, min_length,max_length, horizon,split))
     else:
         binned_split_out = path('output/labvitals_tr_te_val_binned_min_length_{}_max_length_{}_horizon_{}_split_{}.pkl'.format(min_length,max_length, horizon,split))
@@ -219,8 +231,6 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
     for t in ['intime','control_onset_time']: 
         control_static[t] = control_static[t].apply( lambda x: datetime.strptime(x, "%Y-%m-%d %H:%M:%S") )
     
-    # Align onset hours of cases and controls in one simple df to map id to onset_hour (for compact_transform)
-    onset_hours = get_onset_hour(case_static, control_static)
 
     if overwrite or not os.path.isfile(labvital_outpath):
         # IF NOT ALREADY RUN, UNCOMMENT THIS SECTION:
@@ -239,11 +249,9 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
             collect_records(case_labs_in,case_labs_out)
 
             print('Collecting Control vitals...')
-
             collect_records(control_vitals_in,control_vitals_out)
 
             print('Collecting Control labs...')
-
             collect_records(control_labs_in,control_labs_out)
 
             #the notes have already been grouped per charttime per patient in M0_preprocessing.py
@@ -252,91 +260,105 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
             
         #---------------------------------
         # 1. b): Load collected data
+        merge = ['icustay_id', 'chart_time', 'chart_hour', 'subject_id']
 
-        print('Loading collected case records...')
-        # Read and convert case vitals
-        case_vitals = pd.read_csv(case_vitals_out).drop(columns=['sepsis_target'])
-        case_vitals['chart_time'] = pd.to_datetime(case_vitals['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+        if use_labvitals:
 
-        # Read and convert case labs
-        case_labs = pd.read_csv(case_labs_out).drop(columns=['sepsis_target'])
-        case_labs['chart_time'] = pd.to_datetime(case_labs['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+            print('Loading collected case records...')
+            # Read and convert case vitals
+            case_vitals = pd.read_csv(case_vitals_out).drop(columns=['sepsis_target'])
+            case_vitals['chart_time'] = pd.to_datetime(case_vitals['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
 
-        print('Loading collected control records...')
+            # Read and convert case labs
+            case_labs = pd.read_csv(case_labs_out).drop(columns=['sepsis_target'])
+            case_labs['chart_time'] = pd.to_datetime(case_labs['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
 
-        # Read and convert control vitals
-        control_vitals = pd.read_csv(control_vitals_out).drop(columns=['pseudo_target'])
-        control_vitals['chart_time'] = pd.to_datetime(control_vitals['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+            print('Loading collected control records...')
 
-        # Read and convert control labs
-        control_labs = pd.read_csv(control_labs_out).drop(columns=['pseudo_target'])
-        control_labs['chart_time'] = pd.to_datetime(control_labs['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+            # Read and convert control vitals
+            control_vitals = pd.read_csv(control_vitals_out).drop(columns=['pseudo_target'])
+            control_vitals['chart_time'] = pd.to_datetime(control_vitals['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
 
-        for df in [case_vitals, case_labs, control_vitals, control_labs]:
-            df.dropna(subset=['chart_time'], inplace=True)
-            df.reset_index(drop=True, inplace=True)
+            # Read and convert control labs
+            control_labs = pd.read_csv(control_labs_out).drop(columns=['pseudo_target'])
+            control_labs['chart_time'] = pd.to_datetime(control_labs['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
 
-        if selected_notes:
+            for df in [case_vitals, case_labs, control_vitals, control_labs]:
+                df.dropna(subset=['chart_time'], inplace=True)
+                df.reset_index(drop=True, inplace=True)
+
+
+        if use_notes:
             print('Loading collected note records...')
 
             # Read and convert case notes
             case_notes = pd.read_csv(case_notes_in).drop(columns=['sepsis_target'])
-            case_notes['chart_time'] = pd.to_datetime(case_notes['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+            case_notes['chart_time'] = pd.to_datetime(case_notes['chart_time'], errors='coerce')
 
             # Read and convert control notes       
             control_notes = pd.read_csv(control_notes_in).drop(columns=['pseudo_target'])
-            control_notes['chart_time'] = pd.to_datetime(control_notes['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+            control_notes['chart_time'] = pd.to_datetime(control_notes['chart_time'], errors='coerce')
 
             # Drop rows with missing chart_time just in case
             case_notes = case_notes.dropna(subset=['chart_time']).reset_index(drop=True)
             control_notes = control_notes.dropna(subset=['chart_time']).reset_index(drop=True)
 
-            
+            # Immediately rename columns (except merge keys) with note_type prefix
+            case_notes.columns = [
+                f"{note_type}_{col}" if col not in merge else col
+                for col in case_notes.columns
+            ]
+            control_notes.columns = [
+                f"{note_type}_{col}" if col not in merge else col
+                for col in control_notes.columns
+            ]
+
+
 
 
 
         #---------------------------------
         # 2. a): Merge lab with vital time series (from different sql tables originally) and append case and controls to one dataframe!
         print('Merge lab and vital time series data ..')
-        #case_merge = ['icustay_id', 'chart_time', 'chart_hour', 'subject_id', 'sepsis_target']
-        case_merge = ['icustay_id', 'chart_time', 'chart_hour', 'subject_id']
-        #CASE: Merge vital and lab values into one time series:
-        case_labvitals = pd.merge(case_vitals, case_labs, how='outer', left_on=case_merge, 
-            right_on=case_merge, sort=True)
-        
-        #control_merge = ['icustay_id', 'chart_time', 'chart_hour', 'subject_id', 'pseudo_target']
-        control_merge = ['icustay_id', 'chart_time', 'chart_hour', 'subject_id']
-        #CONTROL: Merge vital and lab values into one time series:
-        control_labvitals = pd.merge(control_vitals, control_labs, how='outer', left_on=control_merge, 
-            right_on=control_merge, sort=True)
 
+        if use_labvitals:
 
-        if selected_notes:
-            print('Merge note data to labvitals...')
-
-            case_notes.columns = [f"{note_type}_{col}" if col not in case_merge else col for col in case_notes.columns]
             #CASE: Merge vital and lab values into one time series:
-            case_labvitals = pd.merge(
-                case_labvitals,
-                case_notes,
-                how='outer',
-                on=case_merge,
-                sort=True
-            )
+            case_labvitals = pd.merge(case_vitals, case_labs, how='outer', left_on=merge, 
+                right_on=merge, sort=True)
 
-
-            control_notes.columns = [f"{note_type}_{col}" if col not in control_merge else col for col in control_notes.columns]
             #CONTROL: Merge vital and lab values into one time series:
-            control_labvitals = pd.merge(
-                control_labvitals,
-                control_notes,
-                how='outer',
-                on=control_merge,
-                sort=True
-            )
- 
+            control_labvitals = pd.merge(control_vitals, control_labs, how='outer', left_on=merge, 
+                right_on=merge, sort=True)
 
-        #---------------------------------
+
+            if use_notes:
+                print('Merge note data to labvitals...')
+
+                # === CASE MERGE ===
+                case_labvitals = pd.merge(
+                    case_labvitals,
+                    case_notes,
+                    how='outer',
+                    on=merge,
+                    sort=True
+                )
+
+                # === CONTROL MERGE ===
+                control_labvitals = pd.merge(
+                    control_labvitals,
+                    control_notes,
+                    how='outer',
+                    on=merge,
+                    sort=True
+                )
+        else:
+            #CASE: Merge vital and lab values into one time series:
+            case_labvitals = case_notes
+            #CONTROL: Merge vital and lab values into one time series:
+            control_labvitals = control_notes
+
+
         # 2. b): Extract case and control window time series
         print('Extract time series window 48 hour before onset for prediction') 
         case_labvitals = extract_window(data=case_labvitals, static_data=case_static,
@@ -344,6 +366,8 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
 
         control_labvitals = extract_window(data=control_labvitals, static_data=control_static,
                                    onset_name='control_onset_time', horizon=horizon)
+
+        
         # in the extract_window() step we drop 633 control stays from 17909 control stays to 17276, as for some controls there is no data in this window (luckily no losses on cases!)
 
         #---------------------------------
@@ -412,12 +436,15 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
     print('Split validation time series!') 
     validation_data = full_labvitals[full_labvitals['icustay_id'].isin(validation_ids)]
 
+
     #---------------------------------
     # 3. b): and Standardize (still in df format, not compact one)
     print('Standardizing time series!')
+
+
     train_z,val_z,test_z, stats = standardize(train=train_data, val=validation_data, test=test_data)
     variables = np.array(list(train_z.iloc[:,variable_start_index:]))
-    
+
     # Write used stats and variable names to json for easier later processing (temporal signature creation)
     stats['names'] = variables.tolist()
     with open(path(f'output/temporal_signature_info_split_{split}.json'), 'w') as jf:
@@ -427,18 +454,26 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
         #call prepro script to bin and impute (carry forward) data for simple baselines
         print('Binned time series not dumped yet, computing and dumping it...')
         #TODO: call prepro script on each split (returning train_data, ..)
-        train_data, sorted_train_ids = bin_and_impute(data=train_z, variable_start_index=variable_start_index, horizon=horizon)
-        validation_data, sorted_validation_ids = bin_and_impute(data=val_z, variable_start_index=variable_start_index, horizon=horizon)
-        test_data, sorted_test_ids = bin_and_impute(data=test_z, variable_start_index=variable_start_index, horizon=horizon)
-
-        X_train = stack_patient_data(train_data)
-        X_val = stack_patient_data(validation_data)
-        X_test = stack_patient_data(test_data)
 
         y_train = label_ids(tvt_ids['train'], case_ids, control_ids)
         y_val = label_ids(tvt_ids['validation'], case_ids, control_ids)
         y_test = label_ids(tvt_ids['test'], case_ids, control_ids)
 
+        label_dicts = {
+            'train': dict(zip(tvt_ids['train'], y_train)),
+            'val': dict(zip(tvt_ids['validation'], y_val)),
+            'test': dict(zip(tvt_ids['test'], y_test)),
+        }
+
+        (train_data, validation_data, test_data), (sorted_train_ids, sorted_validation_ids, sorted_test_ids), variables = bin_and_impute(
+            train_z, val_z, test_z, variable_start_index=variable_start_index, horizon=horizon, label_dicts=label_dicts
+        )
+
+
+        #Stack data to appropriate np format for the keras library
+        X_train = stack_patient_data(train_data)
+        X_val = stack_patient_data(validation_data)
+        X_test = stack_patient_data(test_data)
         
         datadump = [variables, X_train, X_val, X_test, y_train, y_val, y_test]
         pickle.dump( datadump, open(binned_split_out, "wb"))
@@ -453,3 +488,4 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
         datadump = pickle.load( open( binned_split_out, "rb" ))
     #Return the data (not the static here, it should be loaded from compact format as there the masking is applied)
     return datadump
+

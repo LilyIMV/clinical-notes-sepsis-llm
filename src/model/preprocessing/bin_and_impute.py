@@ -4,85 +4,102 @@ Author: Lily Voge, 2025
 This script performs binning and imputation on preprocessed ICU patient time-series data.
 It expects patient-level charted data (with hourly 'chart_time' bins) and:
 - Bins variables into hourly windows from hour 47 down to `horizon` (e.g., 6)
-- Aggregates and imputes missing values via forward-fill and population statistics
+- Aggregates and imputes missing values via forward-fill and population statistics. Takes the mean for all measurements across training
+validation, and test set per prediction label. Uses the mean for the opposite label.
 - Returns a list of standardized patient matrices for modeling
 
-Input: DataFrame with one row per measurement per patient
-Output: List of (time, variable) matrices per patient and a list of sorted patient IDs
+Input: DataFrames for train, validation and test with one row per measurement per patient
+Output: List of (time, variable) matrices per patient for train, validation, test and a list of sorted patient IDs
 """
 
 import pandas as pd
 import numpy as np
 
-def bin_and_impute(data, variable_start_index=5, horizon=0):
+def bin_and_impute(train_df, val_df, test_df, variable_start_index=5, horizon=0, label_dicts=None):
     """
-    Bins and imputes time-series data for each ICU stay.
-
+    Compute class-specific means from all combined data, then apply bin_and_impute to each split.
+    
     Parameters:
-    - data: DataFrame with ICU time-series data, including 'icustay_id' and 'chart_time'
-    - variable_start_index: Index from which variable columns start
-    - horizon: Number of hours before onset to cut off (reduces window to 48 - horizon)
+    - train_df, val_df, test_df: DataFrames containing time-series data
+    - variable_start_index: index where variable columns start
+    - horizon: prediction horizon (used for window indexing)
+    - label_dicts: dict with 'train', 'val', 'test' → {icustay_id: label} mappings
 
     Returns:
-    - imputed_all: List of DataFrames, one per patient (shape: [timesteps, variables])
-    - sorted_ids: List of icustay_ids in processing order
+    - (train_imputed, val_imputed, test_imputed), (sorted_train_ids, ..., sorted_test_ids)
     """
 
-    imputed_all = []
-    sorted_ids = []
-    variables = data.columns[variable_start_index:]
-    id_s = sorted(data['icustay_id'].unique())
+    all_data = pd.concat([train_df, val_df, test_df], ignore_index=True)
+    variables = all_data.columns[variable_start_index:]
+    all_label_dict = {**label_dicts['train'], **label_dicts['val'], **label_dicts['test']}
 
-    # Compute population means
-    population_means = data[variables].mean(skipna=True)
+    # Compute class-specific means
+    label_series = all_data['icustay_id'].map(all_label_dict)
+    class_0_means = all_data[label_series == 0][variables].mean(skipna=True)
+    class_1_means = all_data[label_series == 1][variables].mean(skipna=True)
 
-    for icustay_id in id_s:
-        pat = data.query("icustay_id == @icustay_id").copy()
-        pat = pat.sort_values("chart_time")
+    # Drop variables with NaN means in either class
+    nan_in_class_0 = class_0_means[class_0_means.isna()].index.tolist()
+    nan_in_class_1 = class_1_means[class_1_means.isna()].index.tolist()
+    columns_to_drop = list(set(nan_in_class_0 + nan_in_class_1))
 
-        grouped = []
+    if columns_to_drop:
+        print(f"[DROP] Dropping variables with undefined population means: {columns_to_drop}")
+        class_0_means = class_0_means.drop(columns_to_drop)
+        class_1_means = class_1_means.drop(columns_to_drop)
+        variables = [v for v in variables if v not in columns_to_drop]
+        all_data = all_data.drop(columns=columns_to_drop)
+        train_df = train_df.drop(columns=columns_to_drop)
+        val_df = val_df.drop(columns=columns_to_drop)
+        test_df = test_df.drop(columns=columns_to_drop)
 
-        #Take average of variable if there are multiple values
-        other_agg = pat.groupby("chart_time")[variables].mean()
-        grouped.append(other_agg)
+    def bin_single_split(data_split, label_map):
+        imputed_all = []
+        sorted_ids = []
+        id_s = sorted(data_split['icustay_id'].unique())
 
-        if not grouped:
-            continue  # skip if patient has no usable data
+        for icustay_id in id_s:
+            pat = data_split.query("icustay_id == @icustay_id").copy()
+            pat = pat.sort_values("chart_time")
+            if pat.empty:
+                continue
 
-        pat_grouped = pd.concat(grouped, axis=1)
+            label = label_map.get(icustay_id)
+            population_means = class_1_means if label == 0 else class_0_means
 
-        # Define full time bin index from 47 down to `horizon`
-        full_index = np.arange(47, horizon - 1, -1)  # e.g. 47→6 if horizon=6
+            grouped = [pat.groupby("chart_time")[variables].mean()]
+            pat_grouped = pd.concat(grouped, axis=1)
 
-        # Identify available bins from the original data
-        available_bins = pat_grouped.index
+            full_index = np.arange(47, horizon - 1, -1)
+            available_bins = pat_grouped.index
+            pat_grouped = pat_grouped.reindex(full_index)
+            mask_present = pat_grouped.index.isin(available_bins)
 
-        # Reindex to full bin range
-        pat_grouped = pat_grouped.reindex(full_index)
+            for col in pat_grouped.columns:
+                values = pat_grouped[col].copy()
+                values[~mask_present] = np.nan
+                values = values.ffill()
+                pat_grouped[col] = values
 
-        # Create a mask of which bins were present in the original data
-        mask_present = pat_grouped.index.isin(available_bins)
+            for col in pat_grouped.columns:
+                if pat_grouped[col].isnull().all():
+                    pat_grouped[col] = 0.0
+                else:
+                    mean_val = population_means.get(col)
+                    if pd.isna(mean_val):
+                        mean_val = 0.0
+                    pat_grouped[col] = pat_grouped[col].fillna(mean_val)
 
-        # Step 1: Backfill only within patient’s valid bins since time goes from 47 -> horizon
-        for col in pat_grouped.columns:
-            values = pat_grouped[col].copy()
-            # Only backfill values within the patient's observed range
-            values[~mask_present] = np.nan
-            values = values.ffill()
-            pat_grouped[col] = values
+            if pat_grouped.isnull().any().any():
+                print(f"[WARN] NaNs remaining for patient {icustay_id}!")
 
-        # Step 2: Fill remaining NaNs
-        for col in pat_grouped.columns:
-            if pat_grouped[col].isnull().all():
-                pat_grouped[col] = 0.0
-            else:
-                pat_grouped[col] = pat_grouped[col].fillna(population_means[col])
+            imputed_all.append(pat_grouped)
+            sorted_ids.append(icustay_id)
 
-        # Final check
-        if pat_grouped.isnull().any().any():
-            print(f"[WARN] NaNs remaining for patient {icustay_id}!")
+        return imputed_all, sorted_ids
 
-        imputed_all.append(pat_grouped)
-        sorted_ids.append(icustay_id)
+    train_imputed, train_ids = bin_single_split(train_df, label_dicts['train'])
+    val_imputed, val_ids = bin_single_split(val_df, label_dicts['val'])
+    test_imputed, test_ids = bin_single_split(test_df, label_dicts['test'])
 
-    return imputed_all, sorted_ids
+    return (train_imputed, val_imputed, test_imputed), (train_ids, val_ids, test_ids), variables
