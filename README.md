@@ -46,7 +46,7 @@ This repository provides a postgresql-pipeline to extract vital time series of s
 
 
 ## Library Versions (which were used for development)
-This project uses **two separate conda environments**:
+This project uses **three separate conda environments**:
 
 ### 1. `env`: General Environment
 
@@ -80,7 +80,7 @@ conda env create -f environment_RAG.yml
 ```
 
 
-### 2. `env_model`: Model-specific Environment
+### 3. `env_model`: Model-specific Environment
 
 - Includes dependencies like '`tensorflow`,' etc.
 - Defined in a separate file  `environment_LSTM.yml` 
