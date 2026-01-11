@@ -2,7 +2,7 @@ import os
 import pandas as pd
 from config import SOURCES, HORIZONS
 from train import train_and_evaluate_lstm
-from preprocessing.main_preprocessing import load_data
+from preprocessing.main_preprocessing_clean import load_data
 
 # List all (source, horizon) combinations
 from itertools import product
@@ -16,7 +16,7 @@ if task_id < 0:
 
 source, horizon = all_configs[task_id]
 model_name = f"LSTM_{source}_h{horizon}"
-print(f"\n▶ Task {task_id}: Running {model_name}...")
+print(f"\nTask {task_id}: Running {model_name}...")
 
 # Load data
 data = load_data(
@@ -26,7 +26,6 @@ data = load_data(
     data_sources=['labs', 'vitals', source],
     min_length=7,
     max_length=200,
-    overwrite=True,
     split=0,
     horizon=horizon
 )
@@ -35,7 +34,6 @@ data = load_data(
 metrics = train_and_evaluate_lstm(data, model_name, source, horizon)
 
 # Save results
-results_csv = "../../output/model/M4_lstm_results.csv"
+results_csv = f"output/M4_lstm_results_auprc.csv"
 results_df = pd.DataFrame([{**metrics, 'model': 'LSTM', 'source': source, 'horizon': horizon}])
 results_df.to_csv(results_csv, mode='a', header=not os.path.exists(results_csv), index=False)
-
