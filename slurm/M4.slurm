@@ -7,17 +7,14 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=500G
 #SBATCH --time=48:00:00              
-#SBATCH --array=0-11                # 12 configurations
+#SBATCH --array=[1-11]                # 12 configurations (4 types of models and 3 horizons)
 #SBATCH --output=logs/M4_%a.log
 #SBATCH --error=logs/M4_%a.log
 
 source ~/.bashrc
 conda activate env_model
 
-cd "$(dirname "$0")/../src/model"
-echo "Current directory: $(pwd)"
-
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 nvidia-smi
 
-python main.py
+python3 main.py
