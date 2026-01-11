@@ -24,15 +24,17 @@ import time
 import os.path # check if file exists
 import pickle
 
+import matplotlib.pyplot as plt
+import os
+
 #import preprocessing scripts:
 from .collect_records import *
 from .bin_and_impute import bin_and_impute
 
-BASE_DIR = os.path.expanduser('YOUR_PATH')
+BASE_DIR = os.path.expanduser('~/thesis/final')
 
 def path(rel):
     return os.path.join(BASE_DIR, rel)
-
 
 def stack_patient_data(data_list):
     return np.stack([df.values for df in data_list], axis=0)
@@ -48,43 +50,49 @@ def label_ids(id_list, case_ids, control_ids):
             raise ValueError(f"Unknown label for icustay_id: {pid}")
     return np.array(labels)
 
-
-
 def extract_window(data=None, static_data=None, onset_name=None, horizon=0):
     """
     Extracts a time window for each patient from ICU admission to (onset - horizon),
-    and converts chart_time into hours-before-onset as integers (0 = last hour before onset).
+    and creates:
+      - h_until_onset: hours before onset (0 = last hour before onset)
+    it deletes old chart_time.
     """
     result = pd.DataFrame()
     ids = data['icustay_id'].unique()
 
     for icuid in ids:
         pat = data.query("icustay_id == @icuid").copy()
-        pat['chart_time'] = pd.to_datetime(pat['chart_time'])
+        # Set index
+        pat = pat.set_index(pd.to_datetime(pat['chart_time']))
 
-        # Set chart_time as datetime index
-        pat = pat.set_index(pd.DatetimeIndex(pat['chart_time']))
-
-        # Get ICU admission and onset time
-        start = static_data[static_data['icustay_id'] == icuid]['intime'].values[0]
-        end = static_data[static_data['icustay_id'] == icuid][onset_name].values[0]
+        # window boundaries
+        start = static_data.loc[static_data['icustay_id']==icuid, 'intime'].values[0]
+        end   = static_data.loc[static_data['icustay_id']==icuid, onset_name].values[0]
         early_end = end - pd.Timedelta(hours=horizon)
 
-        # Restrict to window
+        # Extract window
         pat_window = pat[start:early_end].copy()
 
-        # Convert chart_time to hours-before-onset, rounded *down*
-        pat_window['chart_time'] = np.floor(
-            (early_end - pat_window.index) / pd.Timedelta(hours=1)
-        ).astype(int)
+        # Compute h_until_onset
+        h_until = np.floor((early_end - pat_window.index) / pd.Timedelta(hours=1)).astype(int)
+
+        # Insert directly after subject_id
+        pat_window.insert(
+            pat_window.columns.get_loc('subject_id') + 1,
+            'h_until_onset',
+            h_until
+            )
+        
+        if 'chart_time' in pat_window.columns:
+            pat_window.drop(columns=['chart_time'], inplace=True)
 
         result = pd.concat([result, pat_window.reset_index(drop=True)], ignore_index=True)
-
     return result
+
 
 def standardize(train=None, val=None, test=None, binary_prefixes=('M1_',)):
     # Get all variables to consider for standardization (exclude metadata)
-    metadata = {'label', 'icustay_id', 'subject_id', 'chart_time', 'chart_hour'}
+    metadata = {'label', 'icustay_id', 'subject_id', 'h_until_onset', 'chart_time', 'chart_hour'}
     all_vars = [col for col in test.columns if col not in metadata]
 
     # Identify binary variables
@@ -134,7 +142,6 @@ def standardize(train=None, val=None, test=None, binary_prefixes=('M1_',)):
     return train_z, val_z, test_z, stats
 
 
-
 def drop_short_series(data, case_static, control_static, min_length=7):
     # Keep only patients whose onset occurs after the minimum required hours
     long_cases = case_static[case_static['sepsis_onset_hour'] >= min_length]['icustay_id'].values
@@ -171,13 +178,15 @@ def get_onset_hour(case_static, control_static):
 
 
 #Main function:
-def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, data_sources=['labs','vitals','M1','M2','M3'], min_length=None, max_length=None, overwrite=False, split=0):
+def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, data_sources=['labs','vitals','M1','M2','M3'], min_length=None, max_length=None, split=0):
 
     #Parameters:
     rs = np.random.RandomState(split)
     
     #---------------------------------
     # 0. SET PATHS 
+     #---------------------------------
+
     # outpath to case/control-joined and window extracted file
     labvital_outpath = path('output/full_labvitals_horizon_{}.csv'.format(horizon))
 
@@ -232,160 +241,162 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
         control_static[t] = control_static[t].apply( lambda x: datetime.strptime(x, "%Y-%m-%d %H:%M:%S") )
     
 
-    if overwrite or not os.path.isfile(labvital_outpath):
-        # IF NOT ALREADY RUN, UNCOMMENT THIS SECTION:
-        if overwrite or not os.path.isfile(case_vitals_out): #if multi-row records data was not collected in single row per observation time before, do it now
-            
-            #---------------------------------
-            # 1. a): Collect Data line-by-line
-            print('First run of this setting. Collecting Data...')
-            # First collect the data of the sql-queried csv files (case and control vitals) in single rows for each patient & point in time:
+    # IF NOT ALREADY RUN, UNCOMMENT THIS SECTION:
+        
+    #---------------------------------
+    # 1. a): Collect Data line-by-line
+    #---------------------------------
 
-            print('Collecting Case vitals...')
-            collect_records(case_vitals_in,case_vitals_out)
-            #collect_records(args.infile_cases, args.outfile_collected_cases)
+    print('First run of this setting. Collecting Data...')
+    # First collect the data of the sql-queried csv files (case and control vitals) in single rows for each patient & point in time:
 
-            print('Collecting Case labs...')
-            collect_records(case_labs_in,case_labs_out)
+    print('Collecting Case vitals...')
+    collect_records(case_vitals_in,case_vitals_out)
+    #collect_records(args.infile_cases, args.outfile_collected_cases)
 
-            print('Collecting Control vitals...')
-            collect_records(control_vitals_in,control_vitals_out)
+    print('Collecting Case labs...')
+    collect_records(case_labs_in,case_labs_out)
 
-            print('Collecting Control labs...')
-            collect_records(control_labs_in,control_labs_out)
+    print('Collecting Control vitals...')
+    collect_records(control_vitals_in,control_vitals_out)
 
-            #the notes have already been grouped per charttime per patient in M0_preprocessing.py
-        else:
-            print('This data has been collected before, load from csv..')
-            
-        #---------------------------------
-        # 1. b): Load collected data
-        merge = ['icustay_id', 'chart_time', 'chart_hour', 'subject_id']
+    print('Collecting Control labs...')
+    collect_records(control_labs_in,control_labs_out)
 
-        if use_labvitals:
+    #the notes have already been grouped per charttime per patient in M0_preprocessing.py
 
-            print('Loading collected case records...')
-            # Read and convert case vitals
-            case_vitals = pd.read_csv(case_vitals_out).drop(columns=['sepsis_target'])
-            case_vitals['chart_time'] = pd.to_datetime(case_vitals['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+        
+    #---------------------------------
+    # 1. b): Load collected data
+     #---------------------------------
+    merge = ['icustay_id', 'chart_time', 'chart_hour', 'subject_id']
 
-            # Read and convert case labs
-            case_labs = pd.read_csv(case_labs_out).drop(columns=['sepsis_target'])
-            case_labs['chart_time'] = pd.to_datetime(case_labs['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+    if use_labvitals:
 
-            print('Loading collected control records...')
+        print('Loading collected case records...')
+        # Read and convert case vitals
+        case_vitals = pd.read_csv(case_vitals_out).drop(columns=['sepsis_target'])
+        case_vitals['chart_time'] = pd.to_datetime(case_vitals['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
 
-            # Read and convert control vitals
-            control_vitals = pd.read_csv(control_vitals_out).drop(columns=['pseudo_target'])
-            control_vitals['chart_time'] = pd.to_datetime(control_vitals['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+        # Read and convert case labs
+        case_labs = pd.read_csv(case_labs_out).drop(columns=['sepsis_target'])
+        case_labs['chart_time'] = pd.to_datetime(case_labs['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
 
-            # Read and convert control labs
-            control_labs = pd.read_csv(control_labs_out).drop(columns=['pseudo_target'])
-            control_labs['chart_time'] = pd.to_datetime(control_labs['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+        print('Loading collected control records...')
 
-            for df in [case_vitals, case_labs, control_vitals, control_labs]:
-                df.dropna(subset=['chart_time'], inplace=True)
-                df.reset_index(drop=True, inplace=True)
+        # Read and convert control vitals
+        control_vitals = pd.read_csv(control_vitals_out).drop(columns=['pseudo_target'])
+        control_vitals['chart_time'] = pd.to_datetime(control_vitals['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+
+        # Read and convert control labs
+        control_labs = pd.read_csv(control_labs_out).drop(columns=['pseudo_target'])
+        control_labs['chart_time'] = pd.to_datetime(control_labs['chart_time'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+
+        #Drop NA timeframes
+        for df in [case_vitals, case_labs, control_vitals, control_labs]:
+            df.dropna(subset=['chart_time'], inplace=True)
+            df.reset_index(drop=True, inplace=True)
+
+
+    if use_notes:
+        print('Loading collected note records...')
+
+        # Read and convert case notes
+        case_notes = pd.read_csv(case_notes_in).drop(columns=['sepsis_target'])
+        case_notes['chart_time'] = pd.to_datetime(case_notes['chart_time'], errors='coerce')
+
+        # Read and convert control notes       
+        control_notes = pd.read_csv(control_notes_in).drop(columns=['pseudo_target'])
+        control_notes['chart_time'] = pd.to_datetime(control_notes['chart_time'], errors='coerce')
+
+        # Drop rows with missing chart_time just in case
+        case_notes = case_notes.dropna(subset=['chart_time']).reset_index(drop=True)
+        control_notes = control_notes.dropna(subset=['chart_time']).reset_index(drop=True)
+
+        # Immediately rename columns (except merge keys) with note_type prefix
+        case_notes.columns = [
+            f"{note_type}_{col}" if col not in merge else col
+            for col in case_notes.columns
+        ]
+        control_notes.columns = [
+            f"{note_type}_{col}" if col not in merge else col
+            for col in control_notes.columns
+        ]
+
+
+
+
+
+    #---------------------------------
+    # 2. a): Merge lab with vital time series (from different sql tables originally) and append case and controls to one dataframe!
+     #---------------------------------
+    print('Merge lab and vital time series data ..')
+
+    if use_labvitals:
+
+        #CASE: Merge vital and lab values into one time series:
+        case_labvitals = pd.merge(case_vitals, case_labs, how='outer', left_on=merge, 
+            right_on=merge, sort=True)
+
+        #CONTROL: Merge vital and lab values into one time series:
+        control_labvitals = pd.merge(control_vitals, control_labs, how='outer', left_on=merge, 
+            right_on=merge, sort=True)
 
 
         if use_notes:
-            print('Loading collected note records...')
+            print('Merge note data to labvitals...')
 
-            # Read and convert case notes
-            case_notes = pd.read_csv(case_notes_in).drop(columns=['sepsis_target'])
-            case_notes['chart_time'] = pd.to_datetime(case_notes['chart_time'], errors='coerce')
+            # === CASE MERGE ===
+            case_labvitals = pd.merge(
+                case_labvitals,
+                case_notes,
+                how='outer',
+                on=merge,
+                sort=True
+            )
 
-            # Read and convert control notes       
-            control_notes = pd.read_csv(control_notes_in).drop(columns=['pseudo_target'])
-            control_notes['chart_time'] = pd.to_datetime(control_notes['chart_time'], errors='coerce')
-
-            # Drop rows with missing chart_time just in case
-            case_notes = case_notes.dropna(subset=['chart_time']).reset_index(drop=True)
-            control_notes = control_notes.dropna(subset=['chart_time']).reset_index(drop=True)
-
-            # Immediately rename columns (except merge keys) with note_type prefix
-            case_notes.columns = [
-                f"{note_type}_{col}" if col not in merge else col
-                for col in case_notes.columns
-            ]
-            control_notes.columns = [
-                f"{note_type}_{col}" if col not in merge else col
-                for col in control_notes.columns
-            ]
-
-
-
-
-
-        #---------------------------------
-        # 2. a): Merge lab with vital time series (from different sql tables originally) and append case and controls to one dataframe!
-        print('Merge lab and vital time series data ..')
-
-        if use_labvitals:
-
-            #CASE: Merge vital and lab values into one time series:
-            case_labvitals = pd.merge(case_vitals, case_labs, how='outer', left_on=merge, 
-                right_on=merge, sort=True)
-
-            #CONTROL: Merge vital and lab values into one time series:
-            control_labvitals = pd.merge(control_vitals, control_labs, how='outer', left_on=merge, 
-                right_on=merge, sort=True)
-
-
-            if use_notes:
-                print('Merge note data to labvitals...')
-
-                # === CASE MERGE ===
-                case_labvitals = pd.merge(
-                    case_labvitals,
-                    case_notes,
-                    how='outer',
-                    on=merge,
-                    sort=True
-                )
-
-                # === CONTROL MERGE ===
-                control_labvitals = pd.merge(
-                    control_labvitals,
-                    control_notes,
-                    how='outer',
-                    on=merge,
-                    sort=True
-                )
-        else:
-            #CASE: Merge vital and lab values into one time series:
-            case_labvitals = case_notes
-            #CONTROL: Merge vital and lab values into one time series:
-            control_labvitals = control_notes
-
-
-        # 2. b): Extract case and control window time series
-        print('Extract time series window 48 hour before onset for prediction') 
-        case_labvitals = extract_window(data=case_labvitals, static_data=case_static,
-                                onset_name='sepsis_onset', horizon=horizon)
-
-        control_labvitals = extract_window(data=control_labvitals, static_data=control_static,
-                                   onset_name='control_onset_time', horizon=horizon)
-
-        
-        # in the extract_window() step we drop 633 control stays from 17909 control stays to 17276, as for some controls there is no data in this window (luckily no losses on cases!)
-
-        #---------------------------------
-        # 2. c): Join Cases and Controls
-        print('Merge case and control data')
-        #for joining label cases/controls with label: 1/0
-        control_labvitals.insert(loc=0, column='label', value=np.repeat(0,len(control_labvitals)))
-        case_labvitals.insert(loc=0, column='label', value=np.repeat(1,len(case_labvitals)))
-
-
-        #append cases and controls, for spliting/standardizing:
-        full_labvitals = pd.concat([case_labvitals, control_labvitals], ignore_index=True)
-        full_labvitals=full_labvitals.reset_index(drop=True) #drop chart_time index, so that on-the-fly df is identical with loaded one
-        full_labvitals.to_csv(labvital_outpath, index=False)
+            # === CONTROL MERGE ===
+            control_labvitals = pd.merge(
+                control_labvitals,
+                control_notes,
+                how='outer',
+                on=merge,
+                sort=True
+            )
     else:
-        print('full_labvitals_horizon_{}.csv exists, cases/control were merged before and window extracted. Load this file..'.format(horizon))
+        #CASE: Merge vital and lab values into one time series:
+        case_labvitals = case_notes
+        #CONTROL: Merge vital and lab values into one time series:
+        control_labvitals = control_notes
 
-    full_labvitals = pd.read_csv(labvital_outpath)
+    
+    #---------------------------------
+    # 2. b): Extract case and control window time series
+    #---------------------------------
+    print('Extract time series window 48 hour before onset for prediction') 
+    case_labvitals = extract_window(data=case_labvitals, static_data=case_static,
+                            onset_name='sepsis_onset', horizon=horizon)
+
+    control_labvitals = extract_window(data=control_labvitals, static_data=control_static,
+                                onset_name='control_onset_time', horizon=horizon)
+
+    
+    # in the extract_window() step we drop 633 control stays from 17909 control stays to 17276, as for some controls there is no data in this window (luckily no losses on cases!)
+
+    #---------------------------------
+    # 2. c): Join Cases and Controls
+     #---------------------------------
+    print('Merge case and control data')
+    #for joining label cases/controls with label: 1/0
+    control_labvitals.insert(loc=0, column='label', value=np.repeat(0,len(control_labvitals)))
+    case_labvitals.insert(loc=0, column='label', value=np.repeat(1,len(case_labvitals)))
+
+
+    #append cases and controls, for spliting/standardizing:
+    full_labvitals = pd.concat([case_labvitals, control_labvitals], ignore_index=True)
+    full_labvitals=full_labvitals.reset_index(drop=True) #drop index, so that on-the-fly df is identical with loaded one
+    full_labvitals.to_csv(labvital_outpath, index=False)
+
     #full_labvitals = full_labvitals.dropna(axis=1, thresh=na_thres) # drop variables that don't at least have na_thres many measurements..
     #drop too short time series samples.
     if min_length or max_length:
@@ -439,6 +450,7 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
 
     #---------------------------------
     # 3. b): and Standardize (still in df format, not compact one)
+    #---------------------------------
     print('Standardizing time series!')
 
 
@@ -450,42 +462,36 @@ def load_data(test_size=0.1, horizon=0, na_thres=500, variable_start_index=5, da
     with open(path(f'output/temporal_signature_info_split_{split}.json'), 'w') as jf:
         json.dump(stats, jf)
 
-    if overwrite or not os.path.isfile(binned_split_out): 
-        #call prepro script to bin and impute (carry forward) data for simple baselines
-        print('Binned time series not dumped yet, computing and dumping it...')
-        #TODO: call prepro script on each split (returning train_data, ..)
+    #call prepro script to bin and impute (carry forward) data for simple baselines
+    print('Binned time series not dumped yet, computing and dumping it...')
 
-        y_train = label_ids(tvt_ids['train'], case_ids, control_ids)
-        y_val = label_ids(tvt_ids['validation'], case_ids, control_ids)
-        y_test = label_ids(tvt_ids['test'], case_ids, control_ids)
+    y_train = label_ids(tvt_ids['train'], case_ids, control_ids)
+    y_val = label_ids(tvt_ids['validation'], case_ids, control_ids)
+    y_test = label_ids(tvt_ids['test'], case_ids, control_ids)
 
-        label_dicts = {
-            'train': dict(zip(tvt_ids['train'], y_train)),
-            'val': dict(zip(tvt_ids['validation'], y_val)),
-            'test': dict(zip(tvt_ids['test'], y_test)),
+    label_dicts = {
+        'train': dict(zip(tvt_ids['train'], y_train)),
+        'val': dict(zip(tvt_ids['validation'], y_val)),
+        'test': dict(zip(tvt_ids['test'], y_test)),
+    }
+
+    #---------------------------------
+    # 3. c): imputate the data
+    #---------------------------------
+
+    (train_data, validation_data, test_data), (train_ids, val_ids, test_ids), variables = bin_and_impute(
+            train_z, val_z, test_z, horizon=horizon, label_dicts=label_dicts)
+    
+    train_labels = [label_dicts['train'][pid] for pid in train_ids]
+    val_labels   = [label_dicts['val'][pid]   for pid in val_ids]
+    test_labels  = [label_dicts['test'][pid]  for pid in test_ids]
+
+
+    datadump = {
+        'variables': variables,
+        'labels': (train_labels, val_labels, test_labels),
+        'data': (train_data, validation_data, test_data)
         }
 
-        (train_data, validation_data, test_data), (sorted_train_ids, sorted_validation_ids, sorted_test_ids), variables = bin_and_impute(
-            train_z, val_z, test_z, variable_start_index=variable_start_index, horizon=horizon, label_dicts=label_dicts
-        )
-
-
-        #Stack data to appropriate np format for the keras library
-        X_train = stack_patient_data(train_data)
-        X_val = stack_patient_data(validation_data)
-        X_test = stack_patient_data(test_data)
-        
-        datadump = [variables, X_train, X_val, X_test, y_train, y_val, y_test]
-        pickle.dump( datadump, open(binned_split_out, "wb"))
-        #dump also sorted ids for easier processing with DTW matrix..
-        sorted_ids = {'train': sorted_train_ids, 'validation': sorted_validation_ids, 'test': sorted_test_ids}
-        pickle.dump(sorted_ids, open(path(f'output/tvt_sorted_info_split_{split}.pkl'), 'wb') )
-        #with open(f'../../output/tvt_sorted_info_split_{split}.json', 'w') as sf:
-        #    json.dump(sorted_ids, sf)
-
-    else: #read previously dumped data
-        print('Binned time series available, loading it..')
-        datadump = pickle.load( open( binned_split_out, "rb" ))
-    #Return the data (not the static here, it should be loaded from compact format as there the masking is applied)
+    
     return datadump
-
